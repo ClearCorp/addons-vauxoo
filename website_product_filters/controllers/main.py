@@ -167,4 +167,4 @@ class WebsiteSale(website_sale):
                                                search=search, **kwargs)
         return res
 
-openerp.addons.website_sale.controllers.main.website_sale = WebsiteSale
+#openerp.addons.website_sale.controllers.main.website_sale = WebsiteSale
