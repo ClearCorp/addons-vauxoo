@@ -6,8 +6,7 @@ from openerp.exceptions import except_orm, Warning as UserError
 
 class MrpProduction(models.Model):
 
-    """
-    Production Orders / Manufacturing Orders
+    """Production Orders / Manufacturing Orders
     """
     _inherit = 'mrp.production'
     _description = 'Manufacturing Order'
@@ -18,32 +17,55 @@ class MrpProduction(models.Model):
         copy=False,
     )
 
+    def update_production_journal_items(self):
+        mrp_ids = self.search([('state', '=', 'in_production')])
+        for mrp_brw in mrp_ids:
+            aml_ids = []
+            for raw_brw in mrp_brw.move_lines2:
+                aml_ids += [aml.id for aml in raw_brw.aml_all_ids]
+            for fg_brw in mrp_brw.move_created_ids2:
+                aml_ids += [aml.id for aml in fg_brw.aml_all_ids]
+            if aml_ids:
+                self._cr.execute(
+                    ''' UPDATE account_move_line
+                        SET production_id = %s
+                        WHERE id IN %s;''',
+                    (mrp_brw.id, tuple(aml_ids)))
+        return True
+
     @api.multi
     def test_accounting_setting(self):
         self.ensure_one()
+        msg = ''
         if not self.routing_id:
+            msg_journal = _(
+                'Please set a Journal in Product Category: %(cat)s to book '
+                'Production Cost Journal Entries\n')
+            if not self.product_id.categ_id.property_stock_journal:
+                msg += msg_journal % dict(cat=self.product_id.categ_id.name)
+            if msg:
+                raise UserError(msg)
             return True
 
         company_brw = self.env.user.company_id
         require_workcenter_analytic = company_brw.require_workcenter_analytic
 
-        msg = ''
-        msg_financial = _('Add Financial Account on Worcenter: {wc}\n')
-        msg_hour = _('Add Hour Analytical Account on Worcenter: {wc}\n')
-        msg_cycle = _('Add Cycle Analytical Account on Worcenter: {wc}\n')
-        msg_journal = _('Please set a Journal in Routing: {routing} to book '
+        msg_financial = _('Add Financial Account on Worcenter: %(wc)s\n')
+        msg_hour = _('Add Hour Analytical Account on Worcenter: %(wc)s\n')
+        msg_cycle = _('Add Cycle Analytical Account on Worcenter: %(wc)s\n')
+        msg_journal = _('Please set a Journal in Routing: %(routing)s to book '
                         'Production Cost Journal Entries\n')
-        msg_location = _('Add Financial Account on Location: {location} '
-                         'For product: {product}\n')
+        msg_location = _('Add Financial Account on Location: %(location)s '
+                         'For product: %(product)s\n')
 
         if not self.product_id.property_stock_production.\
                 valuation_in_account_id:
-            msg += msg_location.format(
+            msg += msg_location % dict(
                 location=self.product_id.property_stock_production.name,
                 product=self.product_id.name,)
 
         if not self.routing_id.journal_id:
-            msg += msg_journal.format(routing=self.routing_id.name)
+            msg += msg_journal % dict(routing=self.routing_id.name)
 
         for line in self.workcenter_lines:
             wc = line.workcenter_id
@@ -52,18 +74,18 @@ class MrpProduction(models.Model):
 
             if any([hour_cost, cycle_cost]):
                 if not wc.costs_general_account_id:
-                    msg += msg_financial.format(wc=wc.name)
+                    msg += msg_financial % dict(wc=wc.name)
 
             if not require_workcenter_analytic:
                 continue
 
             if hour_cost:
                 if not wc.costs_hour_account_id:
-                    msg += msg_hour.format(wc=wc.name)
+                    msg += msg_hour % dict(wc=wc.name)
 
             if cycle_cost:
                 if not wc.costs_cycle_account_id:
-                    msg += msg_cycle.format(wc=wc.name)
+                    msg += msg_cycle % dict(wc=wc.name)
         if msg:
             raise UserError(msg)
 
@@ -78,17 +100,24 @@ class MrpProduction(models.Model):
     @api.multi
     def check_create_adjustment_accounting_entry(self, amount):
         self.ensure_one()
-        amount_consumed = 0.0
-        for raw_mat in self.move_lines2:
-            if raw_mat.state != 'done':
-                continue
-            amount_consumed += raw_mat.price_unit * raw_mat.product_qty
+        # /!\ NOTE: Using accounting approach instead of logistical approach
+        aml_obj = self.env['account.move.line']
 
+        location_id = self.product_id.property_stock_production
+        account_in_id = location_id.valuation_in_account_id.id
+        account_out_id = location_id.valuation_out_account_id.id
+
+        aml_ids = aml_obj.search(
+            [('production_id', '=', self.id),
+             '|',
+             ('account_id', '=', account_in_id),
+             ('account_id', '=', account_out_id)])
+
+        amount_consumed = 0.0
         amount_produced = 0.0
-        for created in self.move_created_ids2:
-            if created.state != 'done':
-                continue
-            amount_produced += created.price_unit * created.product_qty
+        for aml_brw in aml_ids:
+            amount_consumed += aml_brw.debit
+            amount_produced += aml_brw.credit
 
         return amount + amount_consumed - amount_produced
 
@@ -112,8 +141,10 @@ class MrpProduction(models.Model):
         ap_obj = self.env['account.period']
         am_obj = self.env['account.move']
         date = fields.Date.context_today(self)
+        journal_id = self.routing_id and self.routing_id.journal_id or \
+            self.product_id.categ_id.property_stock_journal
         vals = {
-            'journal_id': self.routing_id.journal_id.id,
+            'journal_id': journal_id.id,
             'period_id': ap_obj.with_context(ctx).find(date)[:1].id,
             'date': date,
             'ref': self.name,
@@ -124,8 +155,7 @@ class MrpProduction(models.Model):
     @api.multi
     def _create_adjustment_account_move_line(
             self, move_id, production_account_id, valuation_account_id, diff):
-        """
-        Generate the account.move.line values to track the production cost.
+        """Generate the account.move.line values to track the production cost.
         """
         self.ensure_one()
         aml_obj = self.env['account.move.line']
@@ -161,8 +191,7 @@ class MrpProduction(models.Model):
 
     @api.multi
     def _create_account_move_line(self, move_id, production_account_id):
-        """
-        Generate the account.move.line values to track the production cost.
+        """Generate the account.move.line values to track the production cost.
         """
         self.ensure_one()
         aml_obj = self.env['account.move.line']
@@ -261,7 +290,10 @@ class MrpProduction(models.Model):
     # TODO: Should this be moved to a new module?
     @api.multi
     def adjust_quant_cost(self, diff):
+        if not diff:
+            return True
         self.ensure_one()
+        quant_obj = self.env['stock.quant']
         # NOTE: this apply to AVG, REAL not to STD
         if self.product_id.cost_method == 'standard':
             return True
@@ -272,16 +304,16 @@ class MrpProduction(models.Model):
         cost = sum([quant2.cost * quant2.qty for quant2 in all_quants])
 
         for quant in all_quants:
-            quant.write({'cost': (cost + diff) / qty})
+            values = {'cost': (cost + diff) / qty}
+            quant_obj.sudo().browse(quant.id).write(values)
         return True
 
     # TODO: Should this be moved to a new module?
     @api.v7
     def costs_generate(self, cr, uid, ids):
-        '''
-        Method to be used by a Web Service
+        """Method to be used by a Web Service
         It returns id of Journal Entry that was created for Cost Generated
-        '''
+        """
         ids = isinstance(ids, (int, long)) and ids or ids[0]
         production = self.browse(cr, uid, ids)
         if not production.workcenter_lines:
@@ -310,11 +342,9 @@ class MrpProduction(models.Model):
         diff = self.check_create_adjustment_accounting_entry(
             cr, uid, production.id, amount)
 
-        if not any([amount, diff]):
-            return amount
-
         # /!\ NOTE: If product is not real_time Do Not Create Journal Entries
-        if production.product_id.valuation == 'real_time':
+        if production.product_id.valuation == 'real_time' and \
+                any([amount, diff]):
             move_id = self._create_account_move(cr, uid, production.id)
             production.write({'account_move_id': move_id.id})
 
@@ -329,17 +359,15 @@ class MrpProduction(models.Model):
                 self._create_adjustment_accounting_entries(
                     cr, uid, production.id, move_id, diff)
 
-        if diff:
-            # TODO: if product produced is AVG recompute avg value
-            # NOTE: Recompute quant cost if not STD
-            self.adjust_quant_cost(cr, uid, production.id, diff)
-            self.refresh_quant(cr, uid, production, amount, diff)
+        self.refresh_quant(cr, uid, production, amount, diff)
 
         return amount
 
     @api.v7
     def refresh_quant(self, cr, uid, production, amount, diff):
+        """Method that allow to refresh values for quant & segmentation costs
         """
-        Method that allow to refresh values for quant & segmentation costs
-        """
+        # TODO: if product produced is AVG recompute avg value
+        # NOTE: Recompute quant cost if not STD
+        self.adjust_quant_cost(cr, uid, production.id, diff)
         return True

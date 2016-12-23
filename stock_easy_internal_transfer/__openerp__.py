@@ -23,7 +23,7 @@
 # ##############################################################################
 {
     "name": "Stock Easy Internal Transfer",
-    "version": "1.6",
+    "version": "8.0.0.1.6",
     "author": "Vauxoo",
     "category": "",
     "website": "http://www.vauxoo.com/",
@@ -34,7 +34,6 @@
     "demo": [],
     "data": [
         'views/stock_view.xml',
-        'wizard/stock_transfer_details.xml',
     ],
     "test": [],
     "js": [],

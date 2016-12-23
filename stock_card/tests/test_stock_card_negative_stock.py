@@ -18,8 +18,20 @@
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 ##############################################################################
+from datetime import datetime, timedelta
+import logging
 from openerp.tests.common import TransactionCase
-from datetime import datetime
+_logger = logging.getLogger(__name__)
+
+try:
+    import pandas as pd
+except ImportError:
+    _logger.debug('Cannot `import pandas`.')
+
+try:
+    from tabulate import tabulate
+except ImportError:
+    _logger.debug('Cannot `import tabulate`.')
 
 
 class TestStockCardNegativeStock(TransactionCase):
@@ -38,6 +50,10 @@ class TestStockCardNegativeStock(TransactionCase):
         self.wizard_item = self.env['stock.transfer_details_items']
         self.transfer_details = self.env['stock.transfer_details']
         self.sale_order = self.env['sale.order']
+        self.delta = 0
+        self.next_hour = datetime.strptime('2016-01-01 01:00:00',
+                                           '%Y-%m-%d %H:%M:%S')
+
         self.inv_ids = [
             {  # 1
                 'do_purchase': True, 'cost': 20, 'qty': 2,
@@ -89,24 +105,34 @@ class TestStockCardNegativeStock(TransactionCase):
             },
         ]
 
-    def do_picking(self, picking_id=False):
-        picking_id.action_confirm()
-        wizard_id = self.wizard.create({
-            'picking_id': picking_id.id,
-        })
-
-        for move_id in picking_id.move_lines:
-            self.wizard_item.create({
-                'transfer_id': wizard_id.id,
-                'product_id': move_id.product_id.id,
-                'quantity': move_id.product_qty,
-                'sourceloc_id': move_id.location_id.id,
-                'destinationloc_id': move_id.location_dest_id.id,
-                'product_uom_id': move_id.product_uom.id,
+    def do_picking(self, picking_ids=False):
+        for picking_id in picking_ids:
+            picking_id.action_assign()
+            picking_id.force_assign()
+            picking_id.action_confirm()
+            wizard_id = self.wizard.create({
+                'picking_id': picking_id.id,
             })
 
-        wizard_id.do_detailed_transfer()
-        self.assertEqual(picking_id.state, 'done')
+            for move_id in picking_id.move_lines:
+                self.wizard_item.create({
+                    'product_id': move_id.product_id.id,
+                    'transfer_id': wizard_id.id,
+                    'sourceloc_id': move_id.location_id.id,
+                    'quantity': move_id.product_qty,
+                    'destinationloc_id': move_id.location_dest_id.id,
+                    'product_uom_id': move_id.product_uom.id,
+                })
+
+            wizard_id.do_detailed_transfer()
+            self.assertEqual(picking_id.state, 'done')
+
+            for move_id in picking_id.move_lines:
+                self.delta += 1
+                self.next_hour = datetime.strptime(
+                    '2016-01-01 01:00:00',
+                    '%Y-%m-%d %H:%M:%S') + timedelta(hours=self.delta)
+                move_id.write({'date': self.next_hour})
 
     def create_purchase_order(self, qty=False, cost=False):
         purchase_order_id = self.purchase_order.create({
@@ -114,8 +140,8 @@ class TestStockCardNegativeStock(TransactionCase):
             'location_id': self.ref('stock.stock_location_stock'),
             'pricelist_id': self.ref('purchase.list0'),
             'order_line': [(0, 0, {
-                'name': "{0} (qty={1}, cost={2})".format(self.product_id.name,
-                                                         qty, cost),
+                'name': "%s (qty=%s, cost=%s)" % (
+                    self.product_id.name, qty, cost),
                 'product_id': self.product_id.id,
                 'price_unit': cost,
                 'product_qty': qty,
@@ -126,12 +152,12 @@ class TestStockCardNegativeStock(TransactionCase):
         purchase_order_id.wkf_confirm_order()
         purchase_order_id.action_invoice_create()
         purchase_order_id.action_picking_create()
-        self.do_picking(purchase_order_id.picking_ids[0])
+        self.do_picking(purchase_order_id.picking_ids)
 
     def create_sale_order(self, qty=False, price=False):
         sale_order_id = self.sale_order.create({
             'partner_id': self.partner_id.id,
-            'client_order_ref': "Sale Order (qty={0}, price={1})".format(
+            'client_order_ref': "Sale Order (qty=%s, price=%s)" % (
                 str(qty), str(price)),
             'order_policy': 'manual',
             'order_line': [(0, 0, {
@@ -142,13 +168,11 @@ class TestStockCardNegativeStock(TransactionCase):
         })
 
         sale_order_id.action_button_confirm()
-        self.do_picking(sale_order_id.picking_ids[0])
+        self.do_picking(sale_order_id.picking_ids)
         return sale_order_id
 
     def get_stock_valuations(self):
-        sc_moves = self.sc_product._stock_card_move_get(
-            self.product_id.id, return_values=True)
-        return sc_moves['res']
+        return self.sc_product._stock_card_move_get(self.product_id.id)['res']
 
     def test_01_do_inouts(self):
 
@@ -166,26 +190,29 @@ class TestStockCardNegativeStock(TransactionCase):
 
         card_lines = self.get_stock_valuations()
 
+        df = pd.DataFrame(card_lines)
+        tbl_sc = tabulate(df, headers='keys', tablefmt='psql')
+        _logger.info('Gotten Stock Card \n%s', tbl_sc)
+
+        df = pd.DataFrame(self.inv_ids)
+        tbl_sc = tabulate(df, headers='keys', tablefmt='psql')
+        _logger.info('Expected Stock Card \n%s', tbl_sc)
+
         self.assertEqual(len(self.inv_ids), len(card_lines),
                          "Both lists should have the same length(=12)")
         for expected, succeded in zip(self.inv_ids, card_lines):
-
             self.assertEqual(expected['avg'],
                              succeded['average'],
-                             "Average Cost {0} is not the expected".
-                             format(expected))
+                             "Average Cost %s is not the expected" % expected)
 
             self.assertEqual(expected['cost'],
                              succeded['cost_unit'],
-                             "Unit Cost {0} is not the expected".
-                             format(expected))
+                             "Unit Cost %s is not the expected" % expected)
 
             self.assertEqual(expected['inv_value'],
                              succeded['inventory_valuation'],
-                             "Inventory Value {0} does not match".
-                             format(expected))
+                             "Inventory Value %s does not match" % expected)
 
             self.assertEqual(expected['move_value'],
                              succeded['move_valuation'],
-                             "Movement Value {0} does not match".
-                             format(expected))
+                             "Movement Value %s does not match" % expected)

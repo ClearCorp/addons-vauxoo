@@ -4,8 +4,7 @@ from openerp import models, fields
 
 
 class MrpRouting(models.Model):
-    """
-    For specifying the routings of Work Centers.
+    """For specifying the routings of Work Centers.
     """
     _inherit = 'mrp.routing'
     journal_id = fields.Many2one(

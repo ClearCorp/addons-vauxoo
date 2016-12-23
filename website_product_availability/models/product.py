@@ -62,15 +62,16 @@ class ProductProduct(models.Model):
                 if route.consider_on_request:
                     product.stock_state = '4'
                     return
-            product.stock_state = self._get_availability_by_qty(
-                product.qty_available, product.low_stock)
+            product.stock_state = product._get_availability_by_qty()
 
-    def _get_availability_by_qty(self, qtys, low_stock):
-        if qtys > low_stock:
+    @api.multi
+    def _get_availability_by_qty(self):
+        self.ensure_one()
+        if self.qty_available > self.low_stock:
             return '1'
-        elif 0 < qtys <= low_stock:
+        elif 0 < self.qty_available <= self.low_stock:
             return '3'
-        elif qtys <= 0:
+        elif self.qty_available <= 0:
             return '2'
 
     low_stock = fields.Integer(
@@ -108,8 +109,7 @@ class ProductProduct(models.Model):
                         stock_state = '4'
                         break
                 if stock_state != '4':
-                    stock_state = self._get_availability_by_qty(
-                        product.qty_available, product.low_stock)
+                    stock_state = product._get_availability_by_qty()
                 location_ok = stock_locations_obj.search(
                     [('product_id', '=', product_id),
                      ('location_id', '=', location.id)])
@@ -151,20 +151,18 @@ class ProductProduct(models.Model):
     @api.multi
     def _product_availability_warehouse(self, warehouse_id):
         # search avalailability for stokable products
-        if self.type not in('product'):
+        if self.type != 'product':
             return True
         domain_quant = []
         product = self
         domain_quant += [('product_id', 'in', [product.id])]
-        domain_quant_loc, domain_move_in_loc,\
-            domain_move_out_loc = product.with_context(
-                warehouse=warehouse_id.id)._get_domain_locations()
+        domain_quant_loc = product.with_context(
+            warehouse=warehouse_id.id)._get_domain_locations()[0]
         domain_quant += domain_quant_loc
         quants = self.env['stock.quant'].read_group(
             domain_quant, ['product_id', 'qty'],
             ['product_id'])
-        quants = dict(
-            map(lambda x: (x['product_id'][0], x['qty']), quants))
+        quants = dict([(x['product_id'][0], x['qty']) for x in quants])
         qty_available = float_round(
             quants.get(product.id, 0.0),
             precision_rounding=product.uom_id.rounding)

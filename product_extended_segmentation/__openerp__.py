@@ -21,14 +21,16 @@
 ##############################################################################
 {
     "name": "Product Extension to track Segmentation Cost",
-    "version": "8.0.1.6.0",
+    "version": "8.0.2.0.0",
     "author": "Vauxoo",
     'website': 'https://www.vauxoo.com',
     "license": "AGPL-3",
     "depends": [
         'product',
         'product_extended',
-        'stock_quant_cost_segmentation',
+        'mrp_routing_account_journal',
+        'stock_card_segmentation',
+        'mrp_workcenter_segmentation',
     ],
     "category": "Generic Modules/Inventory Control",
     "demo": [
@@ -36,6 +38,8 @@
     ],
     "data": [
         'view/view.xml',
+        'view/installer.xml',
+        'view/company.xml',
         'data/data.xml',
     ],
     "installable": True
